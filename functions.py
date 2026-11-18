@@ -176,6 +176,15 @@ async def book_appointment(args: dict, ctx: dict) -> dict:
     return {"booked": True, "booking_uid": booking.get("uid"), "when": when}
 
 
+def _cell_safe(v):
+    # Values come from what callers say. A cell starting with = @ + - opens as a formula in Excel and
+    # Google Sheets (the sheet webhook gets this row too). Phone numbers keep their leading "+".
+    s = "" if v is None else str(v)
+    if s[:1] in ("=", "@", "\t", "\r") or (s[:1] in ("+", "-") and not s[1:].replace(" ", "").isdigit()):
+        return "'" + s
+    return s
+
+
 async def log_outcome(args: dict, ctx: dict) -> dict:
     fields = ["outcome", "lead_type", "motivation", "timeline", "pain_points", "property_details",
               "buyer_criteria", "preapproval", "preapproval_details", "callback_time", "notes"]
@@ -189,6 +198,7 @@ async def log_outcome(args: dict, ctx: dict) -> dict:
         "booked_when": ctx.get("booked_when", ""),
         **{f: args.get(f, "") for f in fields},
     }
+    row = {k: _cell_safe(v) for k, v in row.items()}
     new_file = not LOG_FILE.exists()
     with LOG_FILE.open("a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(row))

@@ -6,6 +6,8 @@ Outbound: POST /call with your CALL_API_KEY header (see README).
 
 import asyncio
 import base64
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -45,7 +47,16 @@ HOLD_PHRASES = re.compile(r"stay on the line|please hold|hold on|see if (this pe
 app = FastAPI()
 
 
+def sign_params(params: dict) -> str:
+    # /media is a public websocket. Without this, anyone who finds the hostname could open a stream
+    # with made-up parameters and make the agent book meetings or text any number.
+    # Empty values are skipped because Twilio may drop empty <Parameter>s.
+    msg = "|".join(f"{k}={params[k]}" for k in sorted(params) if params[k] and k != "sig")
+    return hmac.new(CALL_API_KEY.encode(), msg.encode(), hashlib.sha256).hexdigest()
+
+
 def stream_twiml(params: dict) -> str:
+    params = {**params, "sig": sign_params(params)}
     param_xml = "".join(
         f"<Parameter name={quoteattr(k)} value={quoteattr(v or '')} />" for k, v in params.items()
     )
@@ -126,7 +137,8 @@ async def media(ws: WebSocket):
     stream_sid = None
     dg = None
     tasks: list[asyncio.Task] = []
-    silence = {"task": None, "strikes": 0, "on_hold": False}
+    # "pending" is the silence line we just injected, so we can undo its strike if Deepgram drops it.
+    silence = {"task": None, "strikes": 0, "on_hold": False, "pending": None}
 
     def cancel_silence():
         if silence["task"]:
@@ -138,9 +150,11 @@ async def media(ws: WebSocket):
         await asyncio.sleep(HOLD_SECONDS if silence["on_hold"] else SILENCE_SECONDS)
         silence["strikes"] += 1
         if silence["strikes"] == 1:
+            silence["pending"] = "checkin"
             await dg.send(json.dumps({"type": "InjectAgentMessage", "behavior": "default",
                                       "message": "Are you still there?"}))
         else:
+            silence["pending"] = "goodbye"
             ctx["hangup_pending"] = True
             await dg.send(json.dumps({"type": "InjectAgentMessage", "behavior": "default",
                                       "message": "Sounds like I lost you. We'll try you again at a later time. Bye now."}))
@@ -192,6 +206,7 @@ async def media(ws: WebSocket):
                     )
 
             elif etype == "AgentAudioDone":
+                silence["pending"] = None  # whatever we injected has been spoken
                 if ctx.get("hangup_pending"):
                     # Ask Twilio to tell us when the goodbye has actually finished playing.
                     await ws.send_text(
@@ -206,6 +221,16 @@ async def media(ws: WebSocket):
 
             elif etype in ("Error", "Warning"):
                 print(f"[deepgram {etype}] {event}")
+                if event.get("code") == "INJECT_AGENT_MESSAGE_DURING_AGENT_SPEECH" and silence["pending"]:
+                    # The silence line was dropped, so the caller never heard it. Undo the strike and
+                    # wait again, instead of skipping "Are you still there?" and going straight to goodbye.
+                    if silence["pending"] == "goodbye":
+                        ctx["hangup_pending"] = False
+                    silence["strikes"] -= 1
+                    silence["pending"] = None
+                    print(f"[silence] {etype.lower()}: check-in dropped, waiting again")
+                    cancel_silence()
+                    silence["task"] = asyncio.create_task(silence_watch())
 
     try:
         while True:
@@ -215,7 +240,12 @@ async def media(ws: WebSocket):
             if ev == "start":
                 start = msg["start"]
                 stream_sid = start["streamSid"]
-                ctx.update(start.get("customParameters", {}))
+                params = start.get("customParameters", {})
+                if not hmac.compare_digest(params.get("sig", ""), sign_params(params)):
+                    print("[media] rejected stream with missing or bad signature")
+                    await ws.close(code=1008)
+                    return
+                ctx.update(params)
                 ctx["call_sid"] = start.get("callSid", "")
                 print(f"[call] {ctx.get('direction')} {ctx.get('lead_phone')} ({ctx['call_sid']})")
 
