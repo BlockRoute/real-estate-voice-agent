@@ -138,9 +138,11 @@ async def media(ws: WebSocket):
     dg = None
     tasks: list[asyncio.Task] = []
     # "pending" is the silence line we just injected, so we can undo its strike if Deepgram drops it.
-    silence = {"task": None, "strikes": 0, "on_hold": False, "pending": None}
+    # "seq" numbers each "finished playing" mark so a late mark from an earlier line is ignored.
+    silence = {"task": None, "strikes": 0, "on_hold": False, "pending": None, "seq": 0}
 
     def cancel_silence():
+        silence["seq"] += 1
         if silence["task"]:
             silence["task"].cancel()
             silence["task"] = None
@@ -213,8 +215,12 @@ async def media(ws: WebSocket):
                         json.dumps({"event": "mark", "streamSid": stream_sid, "mark": {"name": "hangup"}})
                     )
                 else:
+                    # AgentAudioDone means Deepgram finished sending audio, but Twilio can still be
+                    # playing it for several seconds. Start the silence timer only once Twilio says
+                    # playback finished, or callers get "Are you still there?" while still listening.
                     cancel_silence()
-                    silence["task"] = asyncio.create_task(silence_watch())
+                    await ws.send_text(json.dumps({"event": "mark", "streamSid": stream_sid,
+                                                   "mark": {"name": f"played-{silence['seq']}"}}))
 
             elif etype == "InjectionRefused":
                 pass  # person started talking; no filler needed
@@ -269,6 +275,9 @@ async def media(ws: WebSocket):
 
             elif ev == "media" and dg is not None:
                 await dg.send(base64.b64decode(msg["media"]["payload"]))
+
+            elif ev == "mark" and msg.get("mark", {}).get("name") == f"played-{silence['seq']}":
+                silence["task"] = asyncio.create_task(silence_watch())
 
             elif ev == "mark" and msg.get("mark", {}).get("name") == "hangup":
                 twilio.calls(ctx["call_sid"]).update(status="completed")
