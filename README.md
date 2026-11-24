@@ -1,6 +1,6 @@
 # Real Estate Voice Agent (Deepgram + Twilio + Cal.com)
 
-Answers inbound calls and calls opted-in leads. Learns motivation, timeline, and pain points, prequalifies buyers (criteria, pre-approval) and sellers (property details), and books an in-person meeting on cal.com/danielyoon. Every call gets logged to `call_log.csv` and, optionally, a webhook.
+Answers inbound calls and calls opted-in leads. Learns motivation, timeline, and pain points, prequalifies buyers (criteria, pre-approval) and sellers (property details), and books an in-person meeting on cal.com or your preferred booking link. Every call gets logged to `call_log.csv` and, optionally, a webhook.
 
 ## Files
 - `app.py`: FastAPI server. `/incoming` answers calls, `/call` dials a lead, `/media` bridges Twilio audio to the Deepgram Voice Agent.
